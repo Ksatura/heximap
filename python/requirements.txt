@@ -1,0 +1,26 @@
+# HEXIMAP Python Port — Bağımlılıklar
+# Kurulum: pip install -r requirements.txt
+#
+# Platform: Linux (Ubuntu 22.04+ / Linux Mint 21+)
+# Python  : 3.10+
+
+# Temel bilimsel hesaplama
+numpy>=1.24
+scipy>=1.10
+
+# Görüntü işleme
+opencv-python>=4.8
+scikit-image>=0.21
+
+# Coğrafi veri işleme
+rasterio>=1.3
+pyproj>=3.5
+
+# Nokta bulutu / ICP
+open3d>=0.17
+
+# PyQt5 (GUI — ilerleyen aşamada)
+PyQt5>=5.15
+
+# Sistem bağımlılıkları (apt ile kurulmalı):
+# sudo apt install -y python3-pip python3-venv gdal-bin libgdal-dev
