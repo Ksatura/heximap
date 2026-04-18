@@ -1,1 +1,3 @@
 mexopencv-master/*
+__pycache__/
+*.pyc
