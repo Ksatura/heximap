@@ -426,7 +426,7 @@ def align_dem(pts, dem_ref, mask, vX, vY):
     # Alt küme seç
     pts_moving, idx = geo_sample_points(pts_moving.T, 10000)
     pts_moving = pts_moving.T
-    n_moving = n_moving[idx]
+    n_moving = n_moving[idx]          # örnekleme sonrası normalları da kırp
 
     # NaN içerenleri kaldır
     valid = np.all(np.isfinite(n_moving), axis=1)
@@ -440,16 +440,18 @@ def align_dem(pts, dem_ref, mask, vX, vY):
     ])
     n_ref = compute_normals(mX, mY, dem_ref, interp=True)
     n_ref = n_ref[valid_r.ravel()]
-    valid = np.all(np.isfinite(n_ref), axis=1)
-    pts_ref = pts_ref[valid]
+    valid_ref = np.all(np.isfinite(n_ref), axis=1)   # ayrı değişken
+    pts_ref   = pts_ref[valid_ref]
+    n_ref     = n_ref[valid_ref]                      # referans normalları da filtrele
 
     # open3d ICP
     pcd_moving = o3d.geometry.PointCloud()
-    pcd_moving.points = o3d.utility.Vector3dVector(pts_moving)
-    pcd_moving.normals = o3d.utility.Vector3dVector(n_moving[valid])
+    pcd_moving.points  = o3d.utility.Vector3dVector(pts_moving)
+    pcd_moving.normals = o3d.utility.Vector3dVector(n_moving)
 
     pcd_ref = o3d.geometry.PointCloud()
-    pcd_ref.points = o3d.utility.Vector3dVector(pts_ref)
+    pcd_ref.points  = o3d.utility.Vector3dVector(pts_ref)
+    pcd_ref.normals = o3d.utility.Vector3dVector(n_ref)    # PointToPlane için zorunlu
 
     result = o3d.pipelines.registration.registration_icp(
         pcd_moving, pcd_ref,
