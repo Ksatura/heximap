@@ -66,9 +66,9 @@ Bu port **OpenCV 4.8+** kullanıyor — tüm API çağrıları güncellendi.
 | Aşama | Durum |
 |---|---|
 | Birim testler | ✅ Tamamlandı |
-| Stitch entegrasyon testi | 🔄 Devam ediyor |
-| Extract entegrasyon testi | ⏳ Bekliyor |
-| Georef entegrasyon testi | ⏳ Bekliyor |
+| Stitch entegrasyon testi | ✅ Tamamlandı |
+| Extract entegrasyon testi | ✅ Tamamlandı |
+| Georef entegrasyon testi | 🔄 Devam ediyor |
 | Rasterize entegrasyon testi | ⏳ Bekliyor |
 | PyQt5 GUI | ⏳ Planlandı |
 
