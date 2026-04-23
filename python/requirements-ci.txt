@@ -1,0 +1,29 @@
+# requirements-ci.txt
+# ─────────────────────────────────────────────────────────────────────────────
+# Bu dosya yalnızca CI ortamı içindir.
+# open3d KASITLI OLARAK DIŞARIDA BIRAKILIYOR:
+#   - ~500 MB indirme, kurulum ~8 dakika
+#   - GitHub Actions ücretsiz kotasını (2000 dk/ay) çarçur eder
+#   - open3d kullanan testler pytest.importorskip("open3d") ile atlanır
+#
+# Yerel geliştirmede requirements.txt kullanmaya devam edin.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Sayısal hesaplama
+numpy>=1.24
+scipy>=1.10
+
+# Görüntü işleme
+opencv-python-headless>=4.8   # "headless": GUI / libGL bağımlılığı yok
+scikit-image>=0.21
+
+# Coğrafi
+# GDAL: pip paketi yerine sistem GDAL'ı kullanılıyor (apt ile kurulmuş)
+# Aşağıdaki satır sistem GDAL versiyonuyla eşleşirse açılabilir:
+# GDAL==$(gdal-config --version)
+pyproj>=3.5
+rasterio>=1.3
+
+# Test altyapısı
+pytest>=7.4
+pytest-timeout>=2.1

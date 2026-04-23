@@ -1,0 +1,98 @@
+name: HEXIMAP Python CI
+
+on:
+  push:
+    branches: ["master", "main", "dev"]
+    paths:
+      - "python/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: ["master", "main"]
+    paths:
+      - "python/**"
+  workflow_dispatch:   # Elle tetikleme için
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true   # Aynı branch'e üst üste push gelirse eskiyi iptal et
+
+jobs:
+  test:
+    name: Integration Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    steps:
+      # ── 1. Kaynak kod ──────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python kurulumu ─────────────────────────────────────────────────
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: python/requirements-ci.txt
+
+      # ── 3. Sistem bağımlılıkları (GDAL + OpenCV sistem kütüphaneleri) ──────
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            gdal-bin \
+            libgdal-dev \
+            libgl1 \
+            libglib2.0-0
+        # libgl1 + libglib2.0-0: headless OpenCV için gerekli
+
+      # ── 4. Python paketleri (CI kümesi — open3d HARİÇ) ────────────────────
+      - name: Install Python dependencies
+        working-directory: python
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install -r requirements-ci.txt
+
+      # ── 5. Linting (hızlı — 30 sn altında) ────────────────────────────────
+      - name: Lint with ruff
+        working-directory: python
+        run: |
+          pip install ruff
+          ruff check shared/ 1_stitch/ 2_extract/ 3_georef/ 4_rasterize/ \
+            --select E,F,W --ignore E501
+        continue-on-error: true   # Lint hatası CI'ı kırmayacak (şimdilik)
+
+      # ── 6. Entegrasyon testleri ────────────────────────────────────────────
+      - name: Run integration tests
+        working-directory: python
+        env:
+          HEXIMAP_CI: "1"          # open3d gerektiren testleri atlamak için
+          PYTHONPATH: "."
+        run: |
+          python -m pytest \
+            integration_test_utils.py \
+            integration_test_shared.py \
+            integration_test_grid2grid.py \
+            integration_test_ransac.py \
+            integration_test_stitch.py \
+            integration_test_extract.py \
+            integration_test_georef.py \
+            integration_test_rasterize.py \
+            -v \
+            --tb=short \
+            --timeout=120 \
+            -p no:warnings \
+            --junit-xml=test-results/results-${{ matrix.python-version }}.xml
+
+      # ── 7. Test sonuçlarını Actions'a aktar ───────────────────────────────
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-py${{ matrix.python-version }}
+          path: python/test-results/
+          retention-days: 14
