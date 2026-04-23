@@ -37,7 +37,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
-          cache-dependency-path: python/requirements-ci.txt
+          cache-dependency-path: requirements-ci.txt
 
       # ── 3. Sistem bağımlılıkları (GDAL + OpenCV sistem kütüphaneleri) ──────
       - name: Install system dependencies
@@ -52,14 +52,14 @@ jobs:
 
       # ── 4. Python paketleri (CI kümesi — open3d HARİÇ) ────────────────────
       - name: Install Python dependencies
-        working-directory: python
+        working-directory: .
         run: |
           python -m pip install --upgrade pip wheel
           pip install -r requirements-ci.txt
 
       # ── 5. Linting (hızlı — 30 sn altında) ────────────────────────────────
       - name: Lint with ruff
-        working-directory: python
+        working-directory: .
         run: |
           pip install ruff
           ruff check shared/ 1_stitch/ 2_extract/ 3_georef/ 4_rasterize/ \
@@ -68,7 +68,7 @@ jobs:
 
       # ── 6. Entegrasyon testleri ────────────────────────────────────────────
       - name: Run integration tests
-        working-directory: python
+        working-directory: .
         env:
           HEXIMAP_CI: "1"          # open3d gerektiren testleri atlamak için
           PYTHONPATH: "."
