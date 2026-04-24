@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# CI'da kontrol edilen kurallar
+select = ["E", "F", "W"]
+
+ignore = [
+    "E501",   # satır uzunluğu — zaten --ignore E501 ile geçiyordu
+    "E702",   # noktalı virgüllü çoklu ifade — MATLAB port stili, kasıtlı
+    "E721",   # tip karşılaştırması == yerine isinstance — numpy dtype için gerekli
+    "E402",   # import sırası — sys.path.insert sonrası import, yapısal zorunluluk
+    "F841",   # kullanılmayan yerel değişken — debug/ileriki kullanım için tutulan
+    "F401",   # try/except bloğundaki importlar yanlış işaretleniyor
+]

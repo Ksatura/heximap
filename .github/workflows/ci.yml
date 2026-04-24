@@ -62,8 +62,7 @@ jobs:
         working-directory: .
         run: |
           pip install ruff
-          ruff check shared/ 1_stitch/ 2_extract/ 3_georef/ 4_rasterize/ \
-            --select E,F,W --ignore E501
+          ruff check python/
         continue-on-error: true   # Lint hatası CI'ı kırmayacak (şimdilik)
 
       # ── 6. Entegrasyon testleri ────────────────────────────────────────────
