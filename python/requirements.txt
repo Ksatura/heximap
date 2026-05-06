@@ -1,26 +1,24 @@
 # HEXIMAP Python Port — Bağımlılıklar
 # Kurulum: pip install -r requirements.txt
-#
-# Platform: Linux (Ubuntu 22.04+ / Linux Mint 21+)
-# Python  : 3.10+
 
-# Temel bilimsel hesaplama
-numpy>=1.24
-scipy>=1.10
+# ── Arayüz ────────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+streamlit-drawable-canvas>=0.9.3   # canvas köşe seçimi
 
-# Görüntü işleme
-opencv-python>=4.8
-scikit-image>=0.21
+# ── Görüntü işleme ────────────────────────────────────────────────────────
+numpy>=1.26.0
+Pillow>=10.0.0
+opencv-python>=4.9.0               # ORB, stereoRectifyUncalibrated, remap
+scipy>=1.12.0                      # Wiener filtresi
+scikit-image>=0.22.0               # CLAHE (equalize_adapthist)
 
-# Coğrafi veri işleme
-rasterio>=1.3
-pyproj>=3.5
+# ── Coğrafi veri ──────────────────────────────────────────────────────────
+rasterio>=1.3.9                    # GeoTIFF okuma/yazma, önizleme
+pyproj>=3.6.0                      # UTM projeksiyon dönüşümü
 
-# Nokta bulutu / ICP
-open3d>=0.17
+# ── Görselleştirme ────────────────────────────────────────────────────────
+matplotlib>=3.8.0                  # DEM önizleme
 
-# PyQt5 (GUI — ilerleyen aşamada)
-PyQt5>=5.15
-
-# Sistem bağımlılıkları (apt ile kurulmalı):
-# sudo apt install -y python3-pip python3-venv gdal-bin libgdal-dev
+# ── Sistem bağımlılıkları (pip ile kurulmaz) ──────────────────────────────
+# zenity          → sudo apt install zenity      (dosya seçici, Linux/X11)
+# libgl1          → sudo apt install libgl1      (OpenCV için)
