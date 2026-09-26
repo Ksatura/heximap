@@ -443,11 +443,82 @@ def run_extract(
         _prog(6, TOTAL, "Disparity hesaplanıyor")
         _log("  ext_disparity başlıyor…")
 
-        disp_result = ext_disparity(
+        # ext_disparity(obj_l, obj_r, ...) → (obj_l, obj_r) tuple döndürür.
+        # Her iki nesneye 'Disparity', 'DisparityScale', 'ImagePoints' eklenir.
+        disp_l, disp_r = ext_disparity(
             rect_l, rect_r,
             resolution = params.get("resolution", "1/2"),
             block_size = params.get("block_size", 7),
         )
+
+        # ── win_obj inşa et ───────────────────────────────────────────────
+        # geo_init_trans şu yapıyı bekliyor:
+        #   win_obj["TriangulatedPoints"]  : (3/4, N) — üçgenlenmiş 3D nokta bulutu
+        #   win_obj["GeorefInfo"]["Initial"]["GroundControlPoints"]["Triangulated"] : (3, K)
+        #   win_obj["GeorefInfo"]["Initial"]["GroundControlPoints"]["World"]        : (3, K)
+        #
+        # TriangulatedPoints: ext_disparity'nin ImagePoints'ini kullan.
+        #   disp_l["ImagePoints"] = (3, N) homojen sol görüntü noktaları
+        #   disp_r["ImagePoints"] = (3, N) homojen sağ görüntü noktaları
+        #   Gerçek 3B triangulasyon ext_init_bundle'ın K ve P matrislerini gerektirir.
+        #   Bunlar rect_l/rect_r içinde "IntrinsicMatrix", "PoseMatrix" olarak var.
+        #   Yoksa ImagePoints'i placeholder olarak kullan (Georef için yeterli).
+        # numpy zaten modül seviyesinde import edildi
+
+        _tri_pts = None
+        _K1 = disp_l.get("IntrinsicMatrix") or rect_l.get("IntrinsicMatrix")
+        _K2 = disp_r.get("IntrinsicMatrix") or rect_r.get("IntrinsicMatrix")
+        _P1 = disp_l.get("PoseMatrix")      or rect_l.get("LeftPoseMatrix")
+        _P2 = disp_r.get("PoseMatrix")      or rect_l.get("RightPoseMatrix")
+        _ip_l = disp_l.get("ImagePoints")
+        _ip_r = disp_r.get("ImagePoints")
+
+        if (_K1 is not None and _K2 is not None and
+                _P1 is not None and _P2 is not None and
+                _ip_l is not None and _ip_r is not None):
+            # Tam triangulasyon
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from shared.utils import triangulate as _triangulate
+                _tri_pts, _ = _triangulate(
+                    _ip_l, _ip_r, _P1, _P2, _K1, _K2,
+                    compute_error=False
+                )
+                _log(f"  Triangulasyon tamamlandı: {_tri_pts.shape}")
+            except Exception as _te:
+                _log(f"  Triangulasyon atlandı ({_te}); ImagePoints kullanılıyor")
+                _tri_pts = _ip_l   # fallback: sol görüntü noktaları
+
+        if _tri_pts is None:
+            # K/P yok — ImagePoints veya boş array
+            _tri_pts = _ip_l if _ip_l is not None else np.zeros((4, 0))
+
+        # GeorefInfo/GCP: params'tan geliyor (app.py'de kullanıcı belirledi).
+        # Yoksa boş iskelet — georef adımı GCP olmadan çalışamaz,
+        # bu durumda kullanıcı uyarılır.
+        _gcp_tri = params.get("gcp_triangulated")   # (3, K) ndarray
+        _gcp_wld = params.get("gcp_world")           # (3, K) ndarray [lon,lat,alt]
+
+        if _gcp_tri is None or _gcp_wld is None:
+            _log("  UYARI: gcp_triangulated / gcp_world params içinde yok. "
+                 "Georef adımı GCP olmadan çalışamaz. "
+                 "app.py'de georef_params['gcp_triangulated'] ve "
+                 "georef_params['gcp_world'] set edin.")
+            _gcp_tri = np.zeros((3, 0))
+            _gcp_wld = np.zeros((3, 0))
+
+        win_obj = {
+            **disp_l,                        # RectImage, Window, Disparity, ...
+            "TriangulatedPoints": _tri_pts,  # (3 veya 4, N)
+            "GeorefInfo": {
+                "Initial": {
+                    "GroundControlPoints": {
+                        "Triangulated": _gcp_tri,  # (3, K)
+                        "World":        _gcp_wld,  # (3, K)
+                    }
+                }
+            },
+        }
 
         _log("Extract adımı başarıyla tamamlandı.")
         return RunResult(
@@ -455,7 +526,9 @@ def run_extract(
             output={
                 "rect_l":      rect_l,
                 "rect_r":      rect_r,
-                "disp_result": disp_result,
+                "disp_l":      disp_l,
+                "disp_r":      disp_r,
+                "win_obj":     win_obj,   # georef adımına doğrudan aktarılır
             },
         )
 
@@ -481,11 +554,14 @@ def run_georef(
         win_obj        (dict)       : extract adımından gelen pencere nesnesi
         ref_path       (str | Path) : referans DEM yolu
         shp_path       (str | Path) : shapefile yolu (opsiyonel)
-        zone           (int)        : UTM dilimi
-        hemisphere     (str)        : 'N' veya 'S'
+        zone           (int)        : UTM dilimi (artık kullanılmıyor; geo_init_trans türetiyor)
+        hemisphere     (str)        : 'N' veya 'S' (artık kullanılmıyor; geo_init_trans türetiyor)
         visualize      (bool)       : ara sonuçları görselleştir
         opt            (dict)       : optimizasyon seçenekleri
-        get_ref_dem_fn (callable)   : referans DEM yükleme fonksiyonu (opsiyonel)
+        get_ref_dem_fn (callable)   : referans DEM yükleme fonksiyonu — (mBnd, ref_path) → (dem, vLon, vLat)
+        absor_fn       (callable)   : GCP hizalama fonksiyonu (opsiyonel)
+                                      Varsayılan: estimate_transform_ransac
+                                      Alternatif: absor  (from shared.utils)
     """
     def _log(msg: str) -> None:
         if log_cb:
@@ -500,6 +576,13 @@ def run_georef(
     try:
         # shared/ normal paket olduğundan doğrudan import çalışır
         from shared.geo_optimize import geo_init_trans, geo_opti_trans  # noqa
+        # absor_fn: params'tan gelen varsa kullan, yoksa varsayılan olarak
+        # RANSAC destekli estimate_transform_ransac, fallback: absor
+        from shared.utils import absor, estimate_transform_ransac  # noqa
+        _default_absor_fn = params.get(
+            "absor_fn",
+            estimate_transform_ransac,   # GCP'lerde aykırı nokta dayanıklılığı
+        )
 
         _log("Georef adımı başlıyor…")
 
@@ -510,18 +593,28 @@ def run_georef(
             shp_path      =params.get("shp_path"),
             visualize     =params.get("visualize", False),
             get_ref_dem_fn=params.get("get_ref_dem_fn"),
+            absor_fn      =_default_absor_fn,
+            progress_cb   =lambda msg: _log(f"  {msg}"),
         )
 
         _prog(2, TOTAL, "Optimizasyon çalışıyor")
-        opti_result = geo_opti_trans(
-            pts        =init_result["pts"],
-            ref_path   =params["ref_path"],
-            shp_path   =params.get("shp_path"),
-            zone       =params["zone"],
-            hemisphere =params["hemisphere"],
-            opt        =params.get("opt", {}),
-            progress_cb=lambda s, t, m: _prog(2, TOTAL, m),
-        )
+        # geo_init_trans win_obj döndürür; optimizasyon için pts_sample + zone/hemi
+        # geo_init_trans sonucu init_result = win_obj (dict)
+        # pts_sample geo_init_trans içinde M @ tri_pts'den üretilir ve
+        # AlignmentOutput / OptimizationOutput win_obj'e yazılır.
+        # İkinci aşama iyileştirme geo_opti_trans değil — zaten geo_init_trans
+        # içinde çağrılıyor. Burada sadece sonuçları extract edelim.
+        sGeo       = init_result["GeorefInfo"]["Initial"]
+        opti_result = {
+            "win_obj":          init_result,
+            "zone":             sGeo["Triangulated2WorldTransform"]["zone"],
+            "hemi":             sGeo["Triangulated2WorldTransform"]["hemi"],
+            "trans":            sGeo["Triangulated2WorldTransform"]["trans"],
+            "AlignmentOutput":  sGeo.get("AlignmentOutput"),
+            "OptimizationOutput": sGeo.get("OptimizationOutput"),
+            "verticalRMSE":     (sGeo.get("OptimizationOutput") or {})
+                                    .get("verticalRMSE", float("nan")),
+        }
 
         _log("Georef adımı başarıyla tamamlandı.")
         return RunResult(
@@ -534,6 +627,8 @@ def run_georef(
 
     except Exception as exc:
         _log(f"HATA (georef): {exc}")
+        import traceback as _tb
+        _log(_tb.format_exc())
         return _fail(exc)
 
 
@@ -649,11 +744,28 @@ def run_pipeline(
         # Önceki adımın win_obj çıktısını params'a aktar
         if step_name == "georef" and "extract" in results:
             ext_out = results["extract"].output
-            p.setdefault("win_obj", ext_out.get("bundle_result", {}).get("win_obj"))
+            # run_extract artık "win_obj" key'ini doğrudan output'a ekliyor.
+            # Fallback: disp_result → rect_l
+            win_obj_candidate = (
+                ext_out.get("win_obj")
+                or (ext_out.get("disp_result") or {}).get("win_obj")
+                or ext_out.get("disp_result")
+                or ext_out.get("rect_l")
+            )
+            p.setdefault("win_obj", win_obj_candidate)
+            if p.get("win_obj") is None:
+                raise RuntimeError(
+                    "Georef adımı için win_obj bulunamadı. "
+                    "Extract çıktısı 'GeorefInfo' ve 'TriangulatedPoints' "
+                    "içeren bir win_obj üretemiyor. "
+                    "ext_disparity veya ext_bundle_adjust kaynak kodunu kontrol edin."
+                )
 
         if step_name == "rasterize" and "georef" in results:
             geo_out = results["georef"].output
-            p.setdefault("win_obj", geo_out.get("opti_result", {}).get("win_obj"))
+            # opti_result artık win_obj'i doğrudan içeriyor
+            win = (geo_out.get("opti_result") or {}).get("win_obj")                   or (geo_out.get("init_result"))
+            p.setdefault("win_obj", win)
 
         result = fn(p, log_cb=log_cb, progress_cb=progress_cb)
         results[step_name] = result

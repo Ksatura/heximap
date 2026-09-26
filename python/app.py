@@ -160,6 +160,13 @@ _defaults: dict[str, Any] = {
     # Zenity için session_state mirror — asıl kaynak _ZENITY_* dict'leri
     "zenity_results":   {},
     "zenity_running":   {},
+    # GCP (Yer Kontrol Noktaları): her öğe
+    #   {"rx","ry": rektifiye sol görüntü pikseli,
+    #    "tx","ty","tz": eşleşen yerel triangulated koordinat,
+    #    "match_dist": eşleşme mesafesi (px, düşükse güvenilir),
+    #    "lon","lat","alt": kullanıcının girdiği WGS84}
+    "gcp_points":       [],
+    "gcp_canvas_ver":   0,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -428,6 +435,160 @@ def _canvas_corner_picker(img, tiff_scale: float, corners: list,
         st.error("`streamlit-drawable-canvas` kurulu değil.  "
                  "`pip install streamlit-drawable-canvas`")
         return corners
+
+
+# ── GCP (Yer Kontrol Noktaları) yardımcıları ───────────────────────────────
+def _rect_image_preview(rect_img_arr, max_px: int = 900):
+    """
+    ext_disparity çıktısı RectImage (ndarray) → (PIL.Image, tiff_scale).
+    _geotiff_preview ile aynı sözleşme: tiff_scale = önizleme_px / orijinal_px.
+    """
+    import numpy as np
+    from PIL import Image
+
+    arr = np.asarray(rect_img_arr)
+    if arr.ndim == 2:
+        arr3 = np.stack([arr] * 3, axis=-1)
+    elif arr.ndim == 3 and arr.shape[-1] >= 3:
+        arr3 = arr[..., :3]
+    else:
+        arr3 = np.stack([np.squeeze(arr)] * 3, axis=-1)
+
+    arr3 = np.nan_to_num(arr3.astype(float), nan=0.0)
+    lo, hi = arr3.min(), arr3.max()
+    arr3 = ((arr3 - lo) / (hi - lo) * 255) if hi > lo else np.zeros_like(arr3)
+    img = Image.fromarray(arr3.astype("uint8"), "RGB")
+
+    w, h = img.size
+    scale = min(max_px / w, max_px / h, 1.0)
+    if scale < 1.0:
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                          Image.LANCZOS)
+    return img, scale
+
+
+def _canvas_gcp_last_click(img, tiff_scale: float, key: str):
+    """
+    Rektifiye görüntü üzerinde GCP nokta seçici.
+
+    NOT: Bu canvas bir "veri kaynağı" DEĞİL — sadece kullanıcının en son
+    tıkladığı pikseli okumak için kullanılır. GCP listesinin tek gerçek
+    kaynağı st.session_state["gcp_points"]'tir (aşağıdaki tablo). Bu ayrım
+    bilinçli: canvas içeriğiyle tabloyu çift yönlü senkronize etmeye
+    çalışmak (silme/ekleme çakışmaları) gereksiz karmaşıklık yaratır.
+
+    Döndürür: [x_orig, y_orig] (rektifiye görüntü orijinal piksel uzayında)
+    veya tıklama yoksa None.
+    """
+    try:
+        try:
+            from streamlit_drawable_canvas import st_canvas
+        except ImportError:
+            from streamlit_drawable_canvas_fix import st_canvas
+        from PIL import Image as PILImage
+
+        iw, ih = img.size
+        canvas_w      = min(iw, 720)
+        display_scale = canvas_w / iw
+        canvas_h_adj  = int(ih * display_scale)
+        display_img   = img.resize((canvas_w, canvas_h_adj), PILImage.LANCZOS)
+
+        st.caption("Rektifiye sol görüntüde bir GCP noktasına tıklayın.")
+
+        result = st_canvas(
+            fill_color           = "#f59e0b",
+            stroke_width          = 2,
+            stroke_color          = "#0f1923",
+            background_image     = display_img,
+            update_streamlit      = True,
+            height                = canvas_h_adj,
+            width                 = canvas_w,
+            drawing_mode          = "point",
+            point_display_radius  = 7,
+            key                   = key,
+        )
+
+        if (result is None or result.json_data is None
+                or "objects" not in result.json_data):
+            return None
+
+        objects = result.json_data["objects"]
+        if not objects:
+            return None
+
+        preview_pts = _parse_canvas_points(objects, display_scale)
+        if not preview_pts:
+            return None
+
+        px, py = preview_pts[-1]   # en son tıklanan nokta
+        return [px / tiff_scale, py / tiff_scale]
+
+    except ImportError:
+        st.error("`streamlit-drawable-canvas` kurulu değil.  "
+                 "`pip install streamlit-drawable-canvas`")
+        return None
+
+
+def _match_gcp_to_triangulated(rx: float, ry: float,
+                                disp_l: dict, tri_pts) -> tuple[list, float]:
+    """
+    Rektifiye sol görüntüde tıklanan (rx,ry) pikseline en yakın
+    disp_l["ImagePoints"] sütununu bulur ve karşılık gelen
+    TriangulatedPoints sütununu döndürür.
+
+    ÖNEMLİ VARSAYIM: TriangulatedPoints[:, i] her zaman ImagePoints[:, i]'ye
+    karşılık gelir. Bu, pipeline_runner.run_extract'ta triangulate(ip_l,
+    ip_r, ...) çağrısının nokta sırasını koruması sayesinde geçerlidir;
+    K/P matrisleri yoksa zaten TriangulatedPoints = ImagePoints fallback'i
+    kullanılıyor (bu durumda da sıra birebir aynı).
+
+    Döndürür: (tri_xyz [x,y,z listesi], eşleşme_mesafesi_px)
+    """
+    import numpy as np
+
+    ip = disp_l.get("ImagePoints") if disp_l else None
+    tp = np.asarray(tri_pts) if tri_pts is not None else None
+
+    if ip is None or tp is None or tp.shape[1] == 0:
+        # Eşleşecek veri yok — piksel koordinatını placeholder olarak kullan.
+        # Bu GCP georef optimizasyonuna gerçek 3B nokta olarak giremez;
+        # kullanıcı bunu tabloda match_dist=inf üzerinden görecek.
+        return [rx, ry, 0.0], float("inf")
+
+    ip = np.asarray(ip)
+    n  = min(ip.shape[1], tp.shape[1])
+    dx = ip[0, :n] - rx
+    dy = ip[1, :n] - ry
+    idx  = int(np.argmin(dx**2 + dy**2))
+    dist = float(np.sqrt(dx[idx]**2 + dy[idx]**2))
+
+    col = tp[:, idx]
+    xyz = col[:3].tolist() if col.shape[0] >= 3 else (col.tolist() + [0.0])
+    return xyz, dist
+
+
+def _build_gcp_arrays(gcp_points: list):
+    """
+    st.session_state["gcp_points"] listesinden georef için
+    gcp_triangulated (3,K) ve gcp_world (3,K) ndarray'lerini üretir.
+    lon/lat girilmemiş (0.0, 0.0 varsayılan) satırlar hariç tutulur.
+    """
+    import numpy as np
+
+    valid = [
+        g for g in gcp_points
+        if not (g.get("lon", 0.0) == 0.0 and g.get("lat", 0.0) == 0.0)
+    ]
+    if not valid:
+        return np.zeros((3, 0)), np.zeros((3, 0))
+
+    tri = np.array([[g["tx"] for g in valid],
+                     [g["ty"] for g in valid],
+                     [g["tz"] for g in valid]])
+    wld = np.array([[g["lon"] for g in valid],
+                     [g["lat"] for g in valid],
+                     [g["alt"] for g in valid]])
+    return tri, wld
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -730,6 +891,173 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ADIM 2.5 — GCP (YER KONTROL NOKTALARI)
+# ───────────────────────────────────────────────────────────────────────────
+# Georef adımı GCP olmadan anlamsız (bkz. run_extract, gcp_triangulated /
+# gcp_world params). Bu panel, Extract adımı en az bir kez çalıştırıldıktan
+# sonra üretilen rektifiye sol görüntü + ImagePoints/TriangulatedPoints
+# eşleşmesini kullanarak kullanıcının yerel↔WGS84 nokta çiftleri girmesini
+# sağlar. Georef çalıştırıldığında bu GCP'ler extract'ın win_obj'üne
+# enjekte edilir — extract'ı yeniden çalıştırmaya gerek yoktur.
+# ═══════════════════════════════════════════════════════════════════════════
+st.markdown('<div class="hx-step">', unsafe_allow_html=True)
+st.markdown(
+    '<div class="hx-step-title">🎯 ADIM 2.5 · GCP — Yer Kontrol Noktaları</div>',
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Georef, GCP olmadan çalışmaz. Önce **Extract**'ı çalıştırın (Georef/"
+    "Rasterize kutularını kapatıp sadece Extract ile bir kez çalıştırmanız "
+    "yeterli), sonra aşağıdan en az **3** GCP girin."
+)
+
+_extract_res = st.session_state["last_results"].get("extract")
+_extract_ok  = bool(
+    _extract_res and getattr(_extract_res, "success", False)
+    and isinstance(_extract_res.output, dict)
+)
+
+if not _extract_ok:
+    st.info(
+        "Henüz başarılı bir Extract sonucu yok. Aşağıdaki 'Pipeline'ı "
+        "Çalıştır' ile önce Extract'ı (tek başına) çalıştırın; rektifiye "
+        "görüntü burada görünecek."
+    )
+else:
+    _disp_l    = _extract_res.output.get("disp_l") or {}
+    _win_obj_x = _extract_res.output.get("win_obj") or {}
+    _tri_pts_x = _win_obj_x.get("TriangulatedPoints")
+    _rect_img  = _disp_l.get("RectImage")
+
+    tab_pick, tab_json_gcp = st.tabs(
+        ["🖱️ Rektifiye görüntüden seç", "⌨️ Manuel JSON"]
+    )
+
+    with tab_pick:
+        if _rect_img is None:
+            st.warning(
+                "Extract çıktısında `RectImage` bulunamadı — "
+                "manuel JSON sekmesini kullanın."
+            )
+        else:
+            rimg, rscale = _rect_image_preview(_rect_img)
+            canvas_key = f"gcp_canvas_v{st.session_state['gcp_canvas_ver']}"
+            last_click = _canvas_gcp_last_click(rimg, rscale, key=canvas_key)
+
+            pc1, pc2 = st.columns([2, 1])
+            with pc1:
+                if last_click:
+                    st.caption(
+                        f"Son tıklanan piksel (orijinal rektifiye uzay): "
+                        f"({last_click[0]:.1f}, {last_click[1]:.1f})"
+                    )
+                else:
+                    st.caption("Henüz tıklama yok.")
+            with pc2:
+                if st.button("➕ GCP olarak ekle", disabled=not last_click,
+                              use_container_width=True):
+                    rx, ry = last_click
+                    xyz, dist = _match_gcp_to_triangulated(
+                        rx, ry, _disp_l, _tri_pts_x
+                    )
+                    st.session_state["gcp_points"].append({
+                        "rx": rx, "ry": ry,
+                        "tx": xyz[0], "ty": xyz[1], "tz": xyz[2],
+                        "match_dist": dist,
+                        "lon": 0.0, "lat": 0.0, "alt": 0.0,
+                    })
+                    # canvas'ı sıfırla — bir sonraki tıklama için temiz sayfa
+                    st.session_state["gcp_canvas_ver"] += 1
+                    st.rerun()
+
+    with tab_json_gcp:
+        st.caption(
+            "Format: liste of "
+            '`{"rx":,"ry":,"tx":,"ty":,"tz":,"lon":,"lat":,"alt":}` — '
+            "ileri düzey kullanım / yedekleme için."
+        )
+        raw_gcp = st.text_area(
+            "gcp_points_json", key="gcp_points_json_raw", height=100,
+            value=json.dumps(st.session_state["gcp_points"], indent=2)
+                  if st.session_state["gcp_points"] else "",
+            label_visibility="collapsed",
+        )
+        if st.button("JSON'u uygula", key="apply_gcp_json"):
+            try:
+                parsed = json.loads(raw_gcp) if raw_gcp.strip() else []
+                if not isinstance(parsed, list):
+                    raise ValueError("Kök eleman bir liste olmalı.")
+                st.session_state["gcp_points"] = parsed
+                st.rerun()
+            except (json.JSONDecodeError, ValueError) as e:
+                st.error(f"Geçersiz JSON: {e}")
+
+    # ── GCP tablosu (WGS84 girişi + silme) ─────────────────────────────────
+    if st.session_state["gcp_points"]:
+        st.markdown("**GCP Tablosu** — `lon`/`lat`/`alt` sütunlarını doldurun:")
+        try:
+            import pandas as pd
+            df = pd.DataFrame(st.session_state["gcp_points"])
+            for col in ["rx", "ry", "tx", "ty", "tz", "match_dist",
+                        "lon", "lat", "alt"]:
+                if col not in df.columns:
+                    df[col] = 0.0
+            df = df[["rx", "ry", "tx", "ty", "tz", "match_dist",
+                      "lon", "lat", "alt"]]
+
+            edited = st.data_editor(
+                df,
+                num_rows="dynamic",
+                use_container_width=True,
+                disabled=["rx", "ry", "tx", "ty", "tz", "match_dist"],
+                column_config={
+                    "rx": st.column_config.NumberColumn("piksel x", format="%.1f"),
+                    "ry": st.column_config.NumberColumn("piksel y", format="%.1f"),
+                    "tx": st.column_config.NumberColumn("yerel x", format="%.3f"),
+                    "ty": st.column_config.NumberColumn("yerel y", format="%.3f"),
+                    "tz": st.column_config.NumberColumn("yerel z", format="%.3f"),
+                    "match_dist": st.column_config.NumberColumn(
+                        "eşleşme (px)", format="%.1f",
+                        help="Tıklanan piksel ile en yakın triangulated "
+                             "nokta arasındaki mesafe. Büyükse (>5-10px) "
+                             "güvenilmez — başka bir nokta deneyin.",
+                    ),
+                    "lon": st.column_config.NumberColumn("boylam (lon)", format="%.6f"),
+                    "lat": st.column_config.NumberColumn("enlem (lat)", format="%.6f"),
+                    "alt": st.column_config.NumberColumn("yükseklik (m)", format="%.2f"),
+                },
+                key="gcp_data_editor",
+            )
+            st.session_state["gcp_points"] = edited.to_dict("records")
+
+            _n_filled = sum(
+                1 for g in st.session_state["gcp_points"]
+                if not (g.get("lon", 0.0) == 0.0 and g.get("lat", 0.0) == 0.0)
+            )
+            _n_far = sum(
+                1 for g in st.session_state["gcp_points"]
+                if g.get("match_dist", 0.0) > 5.0
+            )
+            if _n_filled < 3:
+                st.warning(f"WGS84 girilmiş GCP: {_n_filled}/3 (minimum). "
+                           "absor/RANSAC için en az 3 nokta gerekli.")
+            else:
+                st.success(f"✓ {_n_filled} GCP hazır (WGS84 girilmiş).")
+            if _n_far:
+                st.warning(
+                    f"{_n_far} nokta için eşleşme mesafesi >5px — "
+                    "bu noktalar seyrek disparity bölgesine denk gelmiş "
+                    "olabilir, sonucu etkileyebilir."
+                )
+        except ImportError:
+            st.error("`pandas` kurulu değil — GCP tablosu için gerekli.")
+    else:
+        st.info("Henüz GCP eklenmedi.")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # ADIM 3 — GEOREF
 # ═══════════════════════════════════════════════════════════════════════════
 st.markdown('<div class="hx-step">', unsafe_allow_html=True)
@@ -834,6 +1162,16 @@ if run_btn and not st.session_state["pipeline_running"]:
                     f"Kare {i+1}: sağ için 2 köşe gerekli ({len(p['corners_r'])}/2).")
     if run_georef_cb and not st.session_state.get("ref_path"):
         errors.append("Referans DEM yolu girilmedi.")
+    if run_georef_cb:
+        _n_gcp_ready = sum(
+            1 for g in st.session_state.get("gcp_points", [])
+            if not (g.get("lon", 0.0) == 0.0 and g.get("lat", 0.0) == 0.0)
+        )
+        if _n_gcp_ready < 3:
+            errors.append(
+                f"Georef için en az 3 GCP gerekli (şu an {_n_gcp_ready}/3 "
+                "hazır). ADIM 2.5 panelinden GCP ekleyin."
+            )
     if errors:
         for e in errors:
             st.error(e)
@@ -874,6 +1212,12 @@ if run_btn and not st.session_state["pipeline_running"]:
         "corners_l":  _first_pair.get("corners_l") or None,
         "corners_r":  _first_pair.get("corners_r") or None,
     }
+    # GCP'ler ADIM 2.5 panelinde toplanır (session_state["gcp_points"]).
+    # Burada (3,K) ndarray'lere çevrilip run thread'inde extract'ın
+    # win_obj'üne enjekte edilecek — bkz. aşağıdaki "Georef" bloğu.
+    _gcp_tri_arr, _gcp_wld_arr = _build_gcp_arrays(
+        st.session_state.get("gcp_points", [])
+    )
     georef_params = {
         "ref_path":   st.session_state.get("ref_path", ""),
         "shp_path":   st.session_state.get("shp_path") or None,
@@ -909,6 +1253,10 @@ if run_btn and not st.session_state["pipeline_running"]:
 
     # Sidebar'daki RANSAC eşiğini thread'e kapatmak için yerel değişkene al
     _ransac_threshold = ransac_min_inlier
+    # Thread içinde st.session_state'e erişilemez (bu dosyanın Zenity için
+    # kullandığı kuralın aynısı) — bu yüzden gereken önceki sonucu burada,
+    # ana thread'de, sıradan bir yerel değişkene alıyoruz.
+    _prev_extract_result = st.session_state["last_results"].get("extract")
 
     def _run_thread():
         try:
@@ -1002,12 +1350,40 @@ if run_btn and not st.session_state["pipeline_running"]:
             # ── Georef ────────────────────────────────────────────────────
             if "georef" in active_steps:
                 log_q.put(("log", "Georef adımı başlıyor…"))
-                if "extract" in results and hasattr(results["extract"], "output"):
-                    georef_params.setdefault(
-                        "win_obj",
-                        results["extract"].output.get(
-                            "bundle_result", {}).get("win_obj"),
-                    )
+                # DÜZELTME: run_extract çıktısı "win_obj"'i DOĞRUDAN
+                # output'a koyuyor — eski "bundle_result" key'i hiç yok
+                # (her zaman None dönüp georef'i win_obj'siz çalıştırıyordu).
+                # Bu çalıştırmada extract atlanmışsa (GCP toplama akışı:
+                # önce sadece Extract, sonra sadece Georef çalıştırılır),
+                # bir önceki başarılı extract sonucuna düş.
+                _ext_result = results.get("extract") or _prev_extract_result
+                if _ext_result is not None and hasattr(_ext_result, "output"):
+                    _win_obj_g = _ext_result.output.get("win_obj")
+                    if _win_obj_g is not None:
+                        # Arayüzde (ADIM 2.5) toplanan GCP'leri win_obj'e
+                        # enjekte et — extract'ı yeniden çalıştırmadan.
+                        if _gcp_tri_arr.shape[1] > 0:
+                            _win_obj_g.setdefault("GeorefInfo", {}) \
+                                      .setdefault("Initial", {}) \
+                                      .setdefault("GroundControlPoints", {})
+                            _gcp_slot = _win_obj_g["GeorefInfo"]["Initial"]["GroundControlPoints"]
+                            _gcp_slot["Triangulated"] = _gcp_tri_arr
+                            _gcp_slot["World"]        = _gcp_wld_arr
+                            log_q.put(("log",
+                                f"  {_gcp_tri_arr.shape[1]} GCP win_obj'e "
+                                "enjekte edildi."))
+                        else:
+                            log_q.put(("log",
+                                "UYARI: Arayüzde WGS84 girilmiş GCP yok. "
+                                "Georef muhtemelen anlamlı sonuç üretmeyecek."))
+                        georef_params["win_obj"] = _win_obj_g
+                    else:
+                        log_q.put(("log",
+                            "HATA: extract çıktısında win_obj bulunamadı."))
+                else:
+                    log_q.put(("log",
+                        "UYARI: Extract sonucu yok — georef_params['win_obj'] "
+                        "boş kalabilir. Önce Extract'ı çalıştırın."))
                 r = run_georef(georef_params,
                                log_cb=log_cb, progress_cb=prog_cb)
                 results["georef"] = r
